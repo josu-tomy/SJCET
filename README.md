@@ -2,6 +2,9 @@
 
 An AI-driven predictive maintenance risk detection application that analyzes multivariate industrial sensor telemetry to detect equipment operating conditions resembling failure-associated patterns.
 
+- **Live Public Demo:** [https://stories-cement-remember-shift.trycloudflare.com](https://stories-cement-remember-shift.trycloudflare.com)
+- **GitHub Repository:** [https://github.com/josu-tomy/sjcet](https://github.com/josu-tomy/sjcet)
+
 ---
 
 ## 1. Problem Statement
