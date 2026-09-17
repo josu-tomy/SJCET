@@ -303,7 +303,7 @@ st.markdown(
         background-color: #FFFFFF !important;
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
         transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
-        padding: 8px !important;
+        padding: 10px !important;
     }
     
     div[data-testid="stVerticalBlockBorderWrapper"]:hover {
@@ -487,7 +487,7 @@ def render_badge(status_text: str, category: str = "NORMAL") -> str:
         border = "#DC2626"
         color = "#991B1B"
         if not display_txt:
-            display_txt = "HIGH RISK"
+            display_txt = "ANOMALY" if "ANOMALY" in cat else "HIGH RISK"
     else:
         bg = "#F8FAFC"
         border = "#CBD5E1"
@@ -504,24 +504,21 @@ def render_badge(status_text: str, category: str = "NORMAL") -> str:
 
 
 def format_card_timestamp(ts) -> str:
-    """Formats timestamps into human-readable strings like 'Updated 3:42 PM' or '—'."""
+    """Formats timestamps into human-readable strings like 'Updated 17 Sep 2026 • 03:08 PM' or '—'."""
     if not ts or str(ts).strip() in ("—", "None", "", "No inspection recorded"):
         return "—"
-    try:
-        if isinstance(ts, str) and "-" in ts:
-            dt = datetime.datetime.fromisoformat(ts.replace(" ", "T"))
-            return f"Updated {dt.strftime('%I:%M %p').lstrip('0')}"
-        elif isinstance(ts, (datetime.datetime, datetime.date)):
-            return f"Updated {ts.strftime('%I:%M %p').lstrip('0')}"
-        return f"Updated {ts}"
-    except Exception:
-        return f"Updated {ts}"
+    ts_str = str(ts).strip()
+    if ts_str.startswith("Updated "):
+        return ts_str
+    if isinstance(ts, (datetime.datetime, datetime.date)):
+        return f"Updated {ts.strftime('%d %b %Y • %I:%M %p')}"
+    return f"Updated {ts_str}"
 
 
 # -----------------------------------------------------------------------------
 # CENTRALIZED SESSION STATE INITIALIZATION
 # -----------------------------------------------------------------------------
-# 1. Household Equipment State
+# 1. Household Equipment State (Preserves existing analysis across reruns)
 household_status_map = initialize_household_state(list(APPLIANCE_PROFILES.keys()))
 
 # 2. Vehicle Telemetry State
@@ -553,9 +550,10 @@ if "industrial_status" not in st.session_state:
         "pred": None,
         "summary": "No inspection recorded",
         "explanation": "No machine telemetry analyzed in this session.",
+        "readings": {},
     }
 
-# 4. Clean Text Navigation State
+# 4. Clean Navigation State & Programmatic Navigation Handler
 NAV_OPTIONS = [
     "Home Overview",
     "Check Equipment",
@@ -565,8 +563,12 @@ NAV_OPTIONS = [
     "Sensor Integration",
 ]
 
-if "nav_selection" not in st.session_state or st.session_state["nav_selection"] not in NAV_OPTIONS:
-    st.session_state["nav_selection"] = "Home Overview"
+# Consume any pending programmatic navigation BEFORE the navigation widget is instantiated
+if "pending_nav" in st.session_state:
+    st.session_state["nav_bar"] = st.session_state.pop("pending_nav")
+
+if "nav_bar" not in st.session_state or st.session_state["nav_bar"] not in NAV_OPTIONS:
+    st.session_state["nav_bar"] = "Home Overview"
 
 
 # -----------------------------------------------------------------------------
@@ -581,45 +583,90 @@ with header_col1:
 selected_nav = st.segmented_control(
     "Navigation Menu",
     NAV_OPTIONS,
-    default=st.session_state["nav_selection"],
     label_visibility="collapsed",
     key="nav_bar",
 )
 
-if selected_nav and selected_nav != st.session_state["nav_selection"]:
-    st.session_state["nav_selection"] = selected_nav
+current_page = selected_nav if selected_nav else st.session_state.get("nav_bar", "Home Overview")
+
+
+# =============================================================================
+# HELPER: HOME OVERVIEW APPLIANCE CARD RENDERER
+# =============================================================================
+def render_appliance_card(app_name: str, state: dict, profile: dict):
+    """Renders a clean Home Overview card for an appliance with actual readings when analyzed."""
+    status_cat = state.get("status", "NOT ANALYZED")
+    badge_text = state.get("badge", "NOT ANALYZED")
+    last_updated = state.get("last_updated", "—")
+    readings = state.get("readings", {})
+    explanation = state.get("explanation", "")
+
+    with st.container(border=True):
+        st.markdown(f"#### {app_name}")
+        st.markdown(render_badge(badge_text, status_cat), unsafe_allow_html=True)
+        st.caption(format_card_timestamp(last_updated))
+
+        # Only display readings and analysis summary if the appliance has actually been analyzed
+        if status_cat != "NOT ANALYZED" and readings:
+            fields = profile.get("fields", [])
+            lines = []
+            for field in fields:
+                k = field["key"]
+                if k in readings:
+                    val = readings[k]
+                    unit = field.get("unit", "")
+                    if isinstance(val, float):
+                        val_str = f"{int(val)}" if val.is_integer() else f"{val:.1f}"
+                    else:
+                        val_str = str(val)
+                    if unit and unit != "State":
+                        val_str = f"{val_str} {unit}"
+                    lines.append(
+                        f'<div style="display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #F1F5F9; font-size: 0.83rem;">'
+                        f'<span style="color: #475569;">{field["label"]}</span>'
+                        f'<span style="font-weight: 600; color: #0F172A;">{val_str}</span></div>'
+                    )
+
+            if lines:
+                st.markdown(
+                    f'<div style="margin: 10px 0; border-top: 1px solid #E2E8F0; padding-top: 4px;">'
+                    f'{"".join(lines)}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            if explanation and explanation != "No manual telemetry readings entered in this session.":
+                st.markdown(
+                    f'<div style="margin-top: 8px; margin-bottom: 10px; font-size: 0.82rem; line-height: 1.4;">'
+                    f'<strong style="color: #0F172A;">Analysis:</strong><br>'
+                    f'<span style="color: #475569;">{explanation}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+        if st.button("Analyze", key=f"btn_jump_{app_name}", use_container_width=True):
+            st.session_state["pending_nav"] = "Check Equipment"
+            st.session_state["selected_appliance_override"] = app_name
+            st.rerun()
 
 
 # =============================================================================
 # SECTION 1: HOME OVERVIEW (EXECUTIVE LANDING PAGE)
 # =============================================================================
-if st.session_state["nav_selection"] == "Home Overview":
+if current_page == "Home Overview":
     st.markdown("### Equipment Status Overview")
     st.caption("Operational status and diagnostic screening across all monitored assets.")
 
-    # 1. Household Equipment (6 Clean Cards)
+    # 1. Household Equipment (6 Clean Cards in 3 Columns)
     st.markdown("##### Household Appliances")
     cols_h = st.columns(3)
     app_names = list(APPLIANCE_PROFILES.keys())
 
     for idx, name in enumerate(app_names):
         state = household_status_map.get(name, {})
+        profile = APPLIANCE_PROFILES.get(name, {})
         col_idx = idx % 3
 
-        status_cat = state.get("status", "NOT ANALYZED")
-        badge_text = state.get("badge", "NOT ANALYZED")
-        last_updated = state.get("last_updated", "—")
-
         with cols_h[col_idx]:
-            with st.container(border=True):
-                st.markdown(f"#### {name}")
-                st.markdown(render_badge(badge_text, status_cat), unsafe_allow_html=True)
-                st.caption(format_card_timestamp(last_updated))
-                if st.button("Analyze", key=f"btn_jump_{name}", use_container_width=True):
-                    st.session_state["nav_selection"] = "Check Equipment"
-                    st.session_state["nav_bar"] = "Check Equipment"
-                    st.session_state["selected_appliance_override"] = name
-                    st.rerun()
+            render_appliance_card(name, state, profile)
 
     # 2. Fleet Telemetry & Industrial Machinery (2 Wide Cards)
     st.markdown("##### Fleet & Industrial Assets")
@@ -636,9 +683,47 @@ if st.session_state["nav_selection"] == "Home Overview":
             st.markdown("#### Vehicle AI (OBD-II)")
             st.markdown(render_badge(v_badge, v_cat), unsafe_allow_html=True)
             st.caption(format_card_timestamp(v_updated))
+
+            if v_cat != "NOT ANALYZED":
+                v_readings = v_state.get("readings", {})
+                if v_readings:
+                    v_labels = [
+                        ("Engine RPM", v_readings.get("ENGINE_RPM"), "RPM"),
+                        ("Vehicle Speed", v_readings.get("SPEED"), "km/h"),
+                        ("Coolant Temperature", v_readings.get("ENGINE_COOLANT_TEMP"), "°C"),
+                        ("Engine Load", v_readings.get("ENGINE_LOAD"), "%"),
+                        ("Throttle Position", v_readings.get("THROTTLE_POS"), "%"),
+                        ("Intake Air Temperature", v_readings.get("AIR_INTAKE_TEMP"), "°C"),
+                    ]
+                    v_lines = []
+                    for lbl, val, unit in v_labels:
+                        if val is not None:
+                            val_str = f"{int(val)}" if isinstance(val, float) and val.is_integer() else (f"{val:.1f}" if isinstance(val, float) else str(val))
+                            v_lines.append(
+                                f'<div style="display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #F1F5F9; font-size: 0.83rem;">'
+                                f'<span style="color: #475569;">{lbl}</span>'
+                                f'<span style="font-weight: 600; color: #0F172A;">{val_str} {unit}</span></div>'
+                            )
+                    if v_lines:
+                        st.markdown(
+                            f'<div style="margin: 10px 0; border-top: 1px solid #E2E8F0; padding-top: 4px;">'
+                            f'{"".join(v_lines)}</div>',
+                            unsafe_allow_html=True,
+                        )
+                elif v_state.get("latest_reading") and v_state.get("latest_reading") != "No reading yet":
+                    st.caption(v_state.get("latest_reading"))
+
+                v_expl = v_state.get("summary") or v_state.get("explanation")
+                if v_expl and v_expl != "No vehicle telemetry analyzed in this session.":
+                    st.markdown(
+                        f'<div style="margin-top: 8px; margin-bottom: 10px; font-size: 0.82rem; line-height: 1.4;">'
+                        f'<strong style="color: #0F172A;">Analysis:</strong><br>'
+                        f'<span style="color: #475569;">{v_expl}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
             if st.button("Analyze Vehicle", key="btn_jump_v", use_container_width=True):
-                st.session_state["nav_selection"] = "Vehicle AI"
-                st.session_state["nav_bar"] = "Vehicle AI"
+                st.session_state["pending_nav"] = "Vehicle AI"
                 st.rerun()
 
     # Industrial Machine Card
@@ -652,16 +737,53 @@ if st.session_state["nav_selection"] == "Home Overview":
             st.markdown("#### Industrial Machine (AI4I)")
             st.markdown(render_badge(ind_badge, ind_cat), unsafe_allow_html=True)
             st.caption(format_card_timestamp(ind_updated))
+
+            if ind_cat != "NOT ANALYZED":
+                ind_readings = ind_state.get("readings", {})
+                if ind_readings:
+                    ind_labels = [
+                        ("Air Temperature", ind_readings.get("air_temp"), "K"),
+                        ("Process Temperature", ind_readings.get("proc_temp"), "K"),
+                        ("Rotational Speed", ind_readings.get("speed"), "rpm"),
+                        ("Torque", ind_readings.get("torque"), "Nm"),
+                        ("Tool Wear", ind_readings.get("tool_wear"), "min"),
+                    ]
+                    ind_lines = []
+                    for lbl, val, unit in ind_labels:
+                        if val is not None:
+                            val_str = f"{int(val)}" if isinstance(val, float) and val.is_integer() else (f"{val:.1f}" if isinstance(val, float) else str(val))
+                            ind_lines.append(
+                                f'<div style="display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid #F1F5F9; font-size: 0.83rem;">'
+                                f'<span style="color: #475569;">{lbl}</span>'
+                                f'<span style="font-weight: 600; color: #0F172A;">{val_str} {unit}</span></div>'
+                            )
+                    if ind_lines:
+                        st.markdown(
+                            f'<div style="margin: 10px 0; border-top: 1px solid #E2E8F0; padding-top: 4px;">'
+                            f'{"".join(ind_lines)}</div>',
+                            unsafe_allow_html=True,
+                        )
+                elif ind_state.get("prob") is not None:
+                    st.caption(f"Failure Probability: {ind_state['prob']:.1f}%")
+
+                ind_expl = ind_state.get("explanation")
+                if ind_expl and ind_expl != "No machine telemetry analyzed in this session.":
+                    st.markdown(
+                        f'<div style="margin-top: 8px; margin-bottom: 10px; font-size: 0.82rem; line-height: 1.4;">'
+                        f'<strong style="color: #0F172A;">Analysis:</strong><br>'
+                        f'<span style="color: #475569;">{ind_expl}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
             if st.button("Analyze Machine", key="btn_jump_ind", use_container_width=True):
-                st.session_state["nav_selection"] = "Industrial AI"
-                st.session_state["nav_bar"] = "Industrial AI"
+                st.session_state["pending_nav"] = "Industrial AI"
                 st.rerun()
 
 
 # =============================================================================
 # SECTION 2: CHECK EQUIPMENT (HOUSEHOLD WORKFLOW)
 # =============================================================================
-elif st.session_state["nav_selection"] == "Check Equipment":
+elif current_page == "Check Equipment":
     st.markdown("### Check Equipment")
     st.caption("Inspect physical operating parameters for household equipment to detect abnormal stress.")
 
@@ -684,18 +806,22 @@ elif st.session_state["nav_selection"] == "Check Equipment":
 
     # 1. Equipment Selection
     equipment_list = list(APPLIANCE_PROFILES.keys())
-    default_idx = 0
-    override = st.session_state.get("selected_appliance_override")
-    if override and override in equipment_list:
-        default_idx = equipment_list.index(override)
-        st.session_state["selected_appliance_override"] = None
+
+    # Handle programmatic appliance selection from Home Overview jump buttons
+    if "selected_appliance_override" in st.session_state:
+        override = st.session_state.pop("selected_appliance_override")
+        if override in equipment_list:
+            st.session_state["selected_equipment"] = override
     elif detected_appliance and detected_appliance in equipment_list:
-        default_idx = equipment_list.index(detected_appliance)
+        st.session_state["selected_equipment"] = detected_appliance
+
+    if "selected_equipment" not in st.session_state or st.session_state["selected_equipment"] not in equipment_list:
+        st.session_state["selected_equipment"] = equipment_list[0]
 
     selected_appliance = st.selectbox(
         "Select Equipment to Analyze:",
         equipment_list,
-        index=default_idx,
+        key="selected_equipment",
     )
 
     profile = APPLIANCE_PROFILES[selected_appliance]
@@ -747,7 +873,7 @@ elif st.session_state["nav_selection"] == "Check Equipment":
             for f in fields[:3]
         ])
 
-        # Persist to Centralized State
+        # Persist to Centralized State (Only this appliance is updated)
         save_equipment_analysis(
             appliance=selected_appliance,
             eval_result=eval_res,
@@ -793,7 +919,7 @@ elif st.session_state["nav_selection"] == "Check Equipment":
 # =============================================================================
 # SECTION 3: ENERGY BEHAVIOR (CONSUMPTION ANOMALY MONITOR)
 # =============================================================================
-elif st.session_state["nav_selection"] == "Energy Behavior":
+elif current_page == "Energy Behavior":
     st.markdown("### Energy Behavior")
     st.caption("Compare observed household electricity consumption against expected baseline demand.")
 
@@ -897,7 +1023,7 @@ elif st.session_state["nav_selection"] == "Energy Behavior":
 # =============================================================================
 # SECTION 4: VEHICLE AI (OBD-II MONITORING & SCREENING)
 # =============================================================================
-elif st.session_state["nav_selection"] == "Vehicle AI":
+elif current_page == "Vehicle AI":
     st.markdown("### Vehicle AI")
     st.caption("Vehicle operating-pattern and maintenance-risk screening.")
     st.caption("Notice: This is a prototype screening system. It does not provide a definitive mechanical diagnosis.")
@@ -966,7 +1092,7 @@ elif st.session_state["nav_selection"] == "Vehicle AI":
             try:
                 res_v = analyze_vehicle(v_payload)
                 st.session_state["v_last_eval"] = res_v
-                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now_str = datetime.datetime.now().strftime("%d %b %Y • %I:%M %p")
 
                 status_label = "NORMAL" if res_v["health_category"] == "NORMAL" else ("WARNING" if res_v["health_category"] == "ADVISORY" else "ANOMALY")
                 st.session_state["vehicle_status"] = {
@@ -1092,7 +1218,7 @@ elif st.session_state["nav_selection"] == "Vehicle AI":
                             else:
                                 st.session_state["vehicle_csv_last_result"] = batch_res
                                 t_label = "NORMAL" if batch_res["trip_category"] == "NORMAL" else ("WARNING" if batch_res["trip_category"] == "ADVISORY" else "ANOMALY")
-                                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                now_str = datetime.datetime.now().strftime("%d %b %Y • %I:%M %p")
 
                                 # Synchronize with Home Overview state
                                 st.session_state["vehicle_status"] = {
@@ -1166,7 +1292,7 @@ elif st.session_state["nav_selection"] == "Vehicle AI":
 # =============================================================================
 # SECTION 5: INDUSTRIAL AI (PREDICTIVE MAINTENANCE)
 # =============================================================================
-elif st.session_state["nav_selection"] == "Industrial AI":
+elif current_page == "Industrial AI":
     st.markdown("### Industrial AI")
     st.caption("Milling machine thermodynamic and rotational telemetry predictive maintenance screening.")
 
@@ -1222,7 +1348,7 @@ elif st.session_state["nav_selection"] == "Industrial AI":
             ind_text = "Operating parameters strongly resemble failure-associated conditions."
 
         # Sync to Home Overview State
-        ind_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ind_now = datetime.datetime.now().strftime("%d %b %Y • %I:%M %p")
         st.session_state["industrial_status"] = {
             "status": ind_risk,
             "badge_text": ind_risk,
@@ -1232,6 +1358,13 @@ elif st.session_state["nav_selection"] == "Industrial AI":
             "pred": pred_class,
             "summary": f"{ind_risk} ({prob_pct:.1f}% risk)",
             "explanation": ind_text,
+            "readings": {
+                "air_temp": ind_air,
+                "proc_temp": ind_proc,
+                "speed": ind_speed,
+                "torque": ind_torque,
+                "tool_wear": ind_wear,
+            },
         }
 
         with st.container(border=True):
@@ -1303,7 +1436,7 @@ elif st.session_state["nav_selection"] == "Industrial AI":
 # =============================================================================
 # SECTION 6: SENSOR INTEGRATION & LIMITATIONS
 # =============================================================================
-elif st.session_state["nav_selection"] == "Sensor Integration":
+elif current_page == "Sensor Integration":
     st.markdown("### Sensor Integration")
     st.caption("Telemetry ingestion architecture bridging edge IoT hardware with MachineGuard AI models.")
 
